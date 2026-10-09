@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,7 +15,32 @@ import (
 
 const rpcTimeout = 250 * time.Millisecond
 const maxEventBytes = 1 << 20
-const gitTimeout = 150 * time.Millisecond
+const gitWorkBudget = 350 * time.Millisecond
+const maxGitOutput = 256 << 10
+const maxGitPathOutput = 8 << 10
+
+type cappedBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.Len() {
+		return 0, io.ErrShortWrite
+	}
+	return b.Buffer.Write(p)
+}
+
+func gitOutput(ctx context.Context, limit int, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	var stdout cappedBuffer
+	stdout.limit = limit
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
 
 type event struct {
 	Agent  string `json:"agent"`
@@ -33,33 +59,35 @@ func repoMetadata(cwd string) (repo, branch string, dirty int, ok bool) {
 	if err != nil || !info.IsDir() {
 		return "", "", 0, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), gitWorkBudget)
 	defer cancel()
-	root, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
-	if err != nil || ctx.Err() != nil {
+	root, err := gitOutput(ctx, maxGitPathOutput, "-C", cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
 		return "", "", 0, false
 	}
 	repo = strings.TrimSpace(string(root))
-	ctx, cancel = context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	name, err := exec.CommandContext(ctx, "git", "-C", repo, "branch", "--show-current").Output()
-	if err != nil || ctx.Err() != nil {
+	name, err := gitOutput(ctx, maxGitPathOutput, "-C", repo, "branch", "--show-current")
+	if err != nil {
 		return "", "", 0, false
 	}
 	branch = strings.TrimSpace(string(name))
 	if branch == "" {
 		return "", "", 0, false
 	}
-	ctx, cancel = context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	status, err := exec.CommandContext(ctx, "git", "-C", repo, "status", "--porcelain").Output()
-	if err != nil || ctx.Err() != nil {
+	status, err := gitOutput(ctx, maxGitOutput, "-C", repo, "status", "--porcelain", "-z")
+	if err != nil {
 		return "", "", 0, false
 	}
 	entries := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(status)), "\n") {
-		if strings.TrimSpace(line) != "" {
-			entries++
+	rows := strings.Split(string(status), "\x00")
+	for i := 0; i < len(rows); i++ {
+		row := rows[i]
+		if row == "" {
+			continue
+		}
+		entries++
+		if len(row) >= 2 && (row[0] == 'R' || row[0] == 'C' || row[1] == 'R' || row[1] == 'C') {
+			i++
 		}
 	}
 	return repo, branch, entries, true

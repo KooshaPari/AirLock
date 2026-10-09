@@ -97,6 +97,39 @@ func TestRepoMetadataTracksDirtyAndRejectsNonGit(t *testing.T) {
 	}
 }
 
+func TestRepoMetadataCountsModifiedDeletedRenamedAndMultipleEntries(t *testing.T) {
+	cwd := initRepo(t)
+	for _, name := range []string{"modified.txt", "deleted.txt", "rename-from.txt", "second.txt"} {
+		if err := os.WriteFile(filepath.Join(cwd, name), []byte("original\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit(t, cwd, "add", ".")
+	runGit(t, cwd, "commit", "-m", "tracked files")
+	if err := os.WriteFile(filepath.Join(cwd, "modified.txt"), []byte("changed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(cwd, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, cwd, "mv", "rename-from.txt", "rename-to.txt")
+	if err := os.WriteFile(filepath.Join(cwd, "untracked.txt"), []byte("new\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, dirty, ok := repoMetadata(cwd)
+	if !ok || dirty != 4 {
+		t.Fatalf("dirty entries = %d, ok=%v; want 4", dirty, ok)
+	}
+}
+
+func runGit(t *testing.T, cwd string, args ...string) {
+	t.Helper()
+	cmdArgs := append([]string{"-C", cwd}, args...)
+	if out, err := exec.Command("git", cmdArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
 func TestRunSkipsMissingOrInvalidCWD(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent.sock")
 	for _, input := range []string{`{"hook_event_name":"PostToolUse","tool_name":"Bash"}`, `{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"relative"}`} {
