@@ -2,9 +2,13 @@
 
 This standalone command reads one Codex hook event from stdin and best-effort
 forwards a metadata-only `PostToolUse` record to a Unix socket. The emitted JSON
-contains only `hook_event_name`, `session_id`, and `tool_name`; it excludes
-`tool_input`, `tool_response`, and all unrecognized input fields. Input larger
-than 1 MiB is rejected, and socket connect/write time is bounded to 250 ms.
+contains only `agent`, `hook`, `repo`, `branch`, `dirty`, and `ts`; `dirty` is
+the count of non-empty Git porcelain status entries. Repository metadata is
+derived from an absolute existing `cwd` using Git commands capped at 150 ms each.
+Missing, invalid, non-Git, detached, or timed-out cwd metadata is silently
+ignored. The hook excludes `tool_input`, `tool_response`, and all other input
+fields. Input larger than 1 MiB is rejected, and socket connect/write time is
+bounded to 250 ms.
 Malformed input and observer failures return normally so telemetry cannot block
 the tool flow.
 

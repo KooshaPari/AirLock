@@ -2,16 +2,20 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestRunForwardsOnlyMetadata(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "hook.sock")
+	cwd := initRepo(t)
+	path := socketTestPath(t, "hook.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -27,15 +31,21 @@ func TestRunForwardsOnlyMetadata(t *testing.T) {
 		gotBytes, _ := io.ReadAll(conn)
 		got <- bytes.TrimSuffix(gotBytes, []byte{'\n'})
 	}()
-	input := []byte(`{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"token=secret-input"},"tool_response":{"output":"secret-response"},"extra":"secret-extra"}`)
+	input, err := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": cwd, "tool_input": map[string]string{"command": "token=secret-input"}, "tool_response": map[string]string{"output": "secret-response"}, "extra": "secret-extra"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	run(bytes.NewReader(input), path)
 	select {
 	case payload := <-got:
-		want := []byte(`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash"}`)
-		if !bytes.Equal(payload, want) {
-			t.Fatalf("metadata payload = %s, want %s", payload, want)
+		var got event
+		if err := json.Unmarshal(payload, &got); err != nil {
+			t.Fatal(err)
 		}
-		for _, secret := range [][]byte{[]byte("secret-input"), []byte("secret-response"), []byte("secret-extra"), []byte("tool_input"), []byte("tool_response")} {
+		if got.Agent != "codex" || got.Hook != "Bash" || got.Repo != cwd || got.Branch != "main" || got.Dirty != 0 || got.TS == "" {
+			t.Fatalf("metadata = %+v", got)
+		}
+		for _, secret := range [][]byte{[]byte("secret-input"), []byte("secret-response"), []byte("secret-extra"), []byte("tool_input"), []byte("tool_response"), []byte("session_id")} {
 			if bytes.Contains(payload, secret) {
 				t.Fatalf("forwarded payload contains private input %q: %s", secret, payload)
 			}
@@ -45,8 +55,57 @@ func TestRunForwardsOnlyMetadata(t *testing.T) {
 	}
 }
 
+func initRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-b", "main", dir}, {"-C", dir, "config", "user.email", "test@example.com"}, {"-C", dir, "config", "user.name", "Test"}, {"-C", dir, "commit", "--allow-empty", "-m", "init"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+func socketTestPath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ah")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, name)
+}
+
+func TestRepoMetadataTracksDirtyAndRejectsNonGit(t *testing.T) {
+	cwd := initRepo(t)
+	if _, _, dirty, ok := repoMetadata(cwd); !ok || dirty != 0 {
+		t.Fatalf("clean repo metadata dirty=%v ok=%v", dirty, ok)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "dirty"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	repo, branch, dirty, ok := repoMetadata(cwd)
+	if !ok || repo != cwd || branch != "main" || dirty != 1 {
+		t.Fatalf("dirty repo metadata = %q %q %d %v", repo, branch, dirty, ok)
+	}
+	if _, _, _, ok := repoMetadata(t.TempDir()); ok {
+		t.Fatal("non-git cwd accepted")
+	}
+}
+
+func TestRunSkipsMissingOrInvalidCWD(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent.sock")
+	for _, input := range []string{`{"hook_event_name":"PostToolUse","tool_name":"Bash"}`, `{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"relative"}`} {
+		run(bytes.NewBufferString(input), path)
+	}
+}
+
 func TestRunRejectsOversizedPayload(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "oversize.sock")
+	path := socketTestPath(t, "o.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +145,7 @@ func TestNotifyReturnsWhenSocketMissing(t *testing.T) {
 }
 
 func TestNotifyTimesOutWhenPeerDoesNotRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "stalled.sock")
+	path := socketTestPath(t, "s.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
