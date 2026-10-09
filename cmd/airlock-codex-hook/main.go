@@ -56,13 +56,23 @@ func run(input io.Reader, path string) {
 	if err != nil || len(data) == 0 || len(data) > maxEventBytes {
 		return
 	}
-	var ev struct {
+	var inputEvent struct {
 		HookEventName string `json:"hook_event_name"`
+		SessionID     string `json:"session_id"`
+		ToolName      string `json:"tool_name"`
 	}
-	if json.Unmarshal(data, &ev) != nil || ev.HookEventName != "PostToolUse" {
+	if json.Unmarshal(data, &inputEvent) != nil || inputEvent.HookEventName != "PostToolUse" {
 		return
 	}
-	notify(path, data)
+	metadata, err := json.Marshal(struct {
+		HookEventName string `json:"hook_event_name"`
+		SessionID     string `json:"session_id"`
+		ToolName      string `json:"tool_name"`
+	}{inputEvent.HookEventName, inputEvent.SessionID, inputEvent.ToolName})
+	if err != nil {
+		return
+	}
+	notify(path, metadata)
 }
 
 func main() { run(os.Stdin, socketPath()) }

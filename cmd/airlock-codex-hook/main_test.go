@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestRunPreservesFullPostToolUsePayload(t *testing.T) {
+func TestRunForwardsOnlyMetadata(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hook.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
@@ -27,12 +27,18 @@ func TestRunPreservesFullPostToolUsePayload(t *testing.T) {
 		gotBytes, _ := io.ReadAll(conn)
 		got <- bytes.TrimSuffix(gotBytes, []byte{'\n'})
 	}()
-	input := []byte(`{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"echo secret"},"tool_response":{"output":"done"},"extra":true}`)
+	input := []byte(`{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"token=secret-input"},"tool_response":{"output":"secret-response"},"extra":"secret-extra"}`)
 	run(bytes.NewReader(input), path)
 	select {
 	case payload := <-got:
-		if !bytes.Equal(payload, input) {
-			t.Fatalf("payload changed\n got: %s\nwant: %s", payload, input)
+		want := []byte(`{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash"}`)
+		if !bytes.Equal(payload, want) {
+			t.Fatalf("metadata payload = %s, want %s", payload, want)
+		}
+		for _, secret := range [][]byte{[]byte("secret-input"), []byte("secret-response"), []byte("secret-extra"), []byte("tool_input"), []byte("tool_response")} {
+			if bytes.Contains(payload, secret) {
+				t.Fatalf("forwarded payload contains private input %q: %s", secret, payload)
+			}
 		}
 	case <-time.After(time.Second):
 		t.Fatal("hook did not notify observer")
